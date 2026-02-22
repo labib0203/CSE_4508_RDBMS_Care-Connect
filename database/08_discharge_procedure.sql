@@ -295,53 +295,122 @@ END$$
 DELIMITER ;
 -- [F41: end]
 
--- [REVIEW-BLOCK: L001 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L002 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L003 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L004 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L005 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L006 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L007 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L008 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L009 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L010 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L011 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L012 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L013 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L014 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L015 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L016 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L017 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L018 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L019 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L020 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L021 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L022 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L023 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L024 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L025 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L026 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L027 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L028 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L029 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L030 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L031 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L032 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L033 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L034 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L035 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L036 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L037 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L038 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L039 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L040 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L041 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L042 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L043 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L044 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L045 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L046 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L047 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L048 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L049 validation required, check integrity, peer review pending]
--- [REVIEW-BLOCK: L050 validation required, check integrity, peer review pending]
+
+-- [F41: Extended Discharge Validation System — Farhana Uvro]
+
+DELIMITER $$
+
+-- Procedure: Full pre-discharge validation for a patient
+CREATE OR REPLACE PROCEDURE sp_validate_discharge(
+    IN  p_patient_id     INT,
+    OUT p_can_discharge  TINYINT)
+BEGIN
+    DECLARE v_pending_labs      INT          DEFAULT 0;
+    DECLARE v_pending_bills     DECIMAL(10,2) DEFAULT 0.00;
+    DECLARE v_active_consult    INT          DEFAULT 0;
+    DECLARE v_pending_pharmacy  INT          DEFAULT 0;
+    DECLARE v_open_complaints   INT          DEFAULT 0;
+
+    -- Check pending lab test results
+    SELECT COUNT(*) INTO v_pending_labs
+    FROM lab_tests
+    WHERE patient_id  = p_patient_id
+      AND status      NOT IN ('completed', 'cancelled')
+      AND scheduled_date <= NOW();
+
+    -- Check outstanding billing balance
+    SELECT COALESCE(SUM(total_amount - paid_amount), 0) INTO v_pending_bills
+    FROM billing b
+    JOIN appointments a ON b.appointment_id = a.appointment_id
+    WHERE a.patient_id      = p_patient_id
+      AND b.payment_status != 'paid';
+
+    -- Check for active or in-progress consultations
+    SELECT COUNT(*) INTO v_active_consult
+    FROM consultations
+    WHERE patient_id = p_patient_id
+      AND status     = 'in_progress';
+
+    -- Check for unprocessed pharmacy orders
+    SELECT COUNT(*) INTO v_pending_pharmacy
+    FROM pharmacy_orders
+    WHERE patient_id    = p_patient_id
+      AND order_status NOT IN ('dispensed', 'cancelled');
+
+    -- Check for open patient complaints
+    SELECT COUNT(*) INTO v_open_complaints
+    FROM patient_complaints
+    WHERE patient_id = p_patient_id
+      AND status     = 'open';
+
+    -- Raise specific error for each blocking condition
+    IF v_pending_labs > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot discharge: lab results still pending';
+    ELSEIF v_pending_bills > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot discharge: outstanding billing balance';
+    ELSEIF v_active_consult > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot discharge: consultation still in progress';
+    ELSEIF v_pending_pharmacy > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot discharge: pharmacy order not dispensed';
+    ELSEIF v_open_complaints > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot discharge: open patient complaint unresolved';
+    ELSE
+        SET p_can_discharge = 1;
+        INSERT INTO discharge_log(patient_id, cleared_at, cleared_by, notes)
+        VALUES (p_patient_id, NOW(), CURRENT_USER(),
+                'All pre-discharge checks passed');
+    END IF;
+END$$
+
+-- Trigger: enforce validation on every discharge insert
+CREATE OR REPLACE TRIGGER trg_before_discharge_insert
+BEFORE INSERT ON discharges
+FOR EACH ROW
+BEGIN
+    DECLARE v_ok TINYINT DEFAULT 0;
+    CALL sp_validate_discharge(NEW.patient_id, v_ok);
+    IF v_ok != 1 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Discharge blocked: pre-discharge validation failed';
+    END IF;
+END$$
+
+-- Procedure: Admin override for forced discharge
+CREATE OR REPLACE PROCEDURE sp_force_discharge(
+    IN p_patient_id  INT,
+    IN p_admin_id    INT,
+    IN p_reason      VARCHAR(500))
+BEGIN
+    DECLARE v_is_admin INT DEFAULT 0;
+
+    SELECT COUNT(*) INTO v_is_admin
+    FROM staff
+    WHERE staff_id = p_admin_id AND role = 'admin' AND is_active = 1;
+
+    IF v_is_admin = 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Only active admins can perform a forced discharge';
+    END IF;
+
+    IF p_reason IS NULL OR TRIM(p_reason) = '' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Override reason is mandatory for forced discharge';
+    END IF;
+
+    INSERT INTO discharges(patient_id, discharge_date,
+                           is_forced, admin_override_by, override_reason)
+    VALUES (p_patient_id, NOW(), 1, p_admin_id, p_reason);
+
+    INSERT INTO discharge_log(patient_id, cleared_at,
+                              cleared_by, is_forced, notes)
+    VALUES (p_patient_id, NOW(), p_admin_id, 1,
+            CONCAT('FORCED: ', p_reason));
+END$$
+
+DELIMITER ;
+-- [F41: end]
